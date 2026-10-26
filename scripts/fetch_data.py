@@ -191,7 +191,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default="data/raw",
                    help="输出目录（务必指向数据盘），默认 %(default)s")
     p.add_argument("--limit", type=int, default=None,
-                   help="每个 split 最多保存多少条（调试用），默认不限")
+                   help="每个 split 最多保存多少条；指定后自动走 streaming，"
+                        "不下载全量缓存（大集快速取样）")
     return p.parse_args()
 
 
@@ -219,7 +220,11 @@ def write_jsonl(records: list[dict], path: Path) -> None:
 
 
 def fetch_one(name: str, cfg: dict, output: Path, limit: int | None) -> int:
-    """下载单个数据集、适配字段并落盘，返回保存的总条数。"""
+    """下载单个数据集、适配字段并落盘，返回保存的总条数。
+
+    limit 存在时改走 streaming：像 yelp_full（65 万条）这种大集，
+    为几千条样本下全量缓存纯属浪费，流式取够即止。
+    """
     # 延迟导入：只跑 --help 时不必加载 datasets
     from datasets import load_dataset
 
@@ -227,7 +232,10 @@ def fetch_one(name: str, cfg: dict, output: Path, limit: int | None) -> int:
     print(f"HF 仓库：{cfg['hf_id']}  |  原语：{cfg['primitive']}  |  行业：{cfg['industry']}")
 
     try:
-        ds = load_dataset(cfg["hf_id"])
+        if limit is not None:
+            ds = load_dataset(cfg["hf_id"], streaming=True)
+        else:
+            ds = load_dataset(cfg["hf_id"])
     except Exception as exc:  # 单个失败不阻塞其他数据集
         print(f"下载失败（跳过）：{exc}")
         return 0
