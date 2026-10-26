@@ -1,0 +1,33 @@
+# jev-qwen-decision 依赖清单
+# 注意：本机不安装，云服务器阶段执行 pip install -r requirements.txt
+# 建议 Python >= 3.10，Linux + CUDA 12.x
+
+# ===== 核心：契约层（本地测试也可用）=====
+pydantic>=2.0
+
+# ===== 模型加载与推理 =====
+torch>=2.3.0
+transformers>=4.51.0
+accelerate>=1.0.0
+# 4bit/8bit 量化（QLoRA 与低显存推理需要）
+bitsandbytes>=0.43.0
+
+# ===== 训练（QLoRA 阶段）=====
+peft>=0.11.0
+datasets>=2.19.0
+trl>=0.11.0
+
+# ===== 概率与校准评估 =====
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+
+# ===== 模型下载（国内推荐 ModelScope）=====
+modelscope>=1.14.0
+
+# ===== 测试 =====
+pytest>=8.0.0
+
+# ===== 可选：日志与可视化 =====
+# tensorboard>=2.15.0
+# wandb>=0.17.0

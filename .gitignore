@@ -1,0 +1,55 @@
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ===== 模型权重与数据集（体积大，不入库）=====
+models/
+checkpoints/
+outputs/
+finetuned/
+logs/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.gguf
+
+# 大型数据文件（保留 .example 示例）
+data/**/*.jsonl
+data/**/*.parquet
+!data/**/*.jsonl.example
+!data/**/*.parquet.example
+
+# ===== IDE / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== 环境变量与密钥 =====
+.env
+.env.*
+*.key
+
+# ===== 实验产物 =====
+wandb/
+runs/
+*.log
+evaluation_results.json
+evaluation_summary.*
+.cache/
+hf_cache/
