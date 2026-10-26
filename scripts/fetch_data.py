@@ -55,8 +55,13 @@ def _resolve_label(raw: Any, label_names: list[str] | None) -> str:
 
 
 def _norm_banking77(rec: dict, label_names: list[str] | None) -> dict:
-    """Banking77：客服查询文本 + 意图标签（77 类）。"""
-    return {"text": rec["text"], "label": _resolve_label(rec["label"], label_names)}
+    """Banking77：客服查询文本 + 意图标签（77 类）。
+
+    mteb 转换版的意图名放在 label_text 字段（如 "card_arrival"），
+    label 只是 int 下标且无 ClassLabel 名称表，优先取 label_text。
+    """
+    label = rec.get("label_text") or _resolve_label(rec["label"], label_names)
+    return {"text": rec["text"], "label": label}
 
 
 def _norm_ag_news(rec: dict, label_names: list[str] | None) -> dict:
