@@ -114,6 +114,9 @@ def main() -> None:
     if not os.environ.get("HF_HOME"):
         os.environ["HF_HOME"] = str(output.parent / ".hf_cache")
 
+    # 无 token / 代理环境下 Xet 存储会 401，回退经典下载路径
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
     print(f"模型：{args.model}")
     print(f"目标：{output}")
     print(f"来源：{args.source}")

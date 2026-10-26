@@ -268,6 +268,10 @@ def main() -> None:
     if not os.environ.get("HF_HOME"):
         os.environ["HF_HOME"] = str(output / ".hf_cache")
 
+    # HF 新版 Xet 存储后端在无 token / 走代理时会 401（cas-server.xethub.hf.co），
+    # 禁用后回退到经典 LFS 下载路径，公开数据集免认证可用
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
     # 只检测不设置：是否配了镜像影响能否直连下载
     if not os.environ.get("HF_ENDPOINT"):
         print("提示：未设置 HF_ENDPOINT。国内环境建议先执行：")
