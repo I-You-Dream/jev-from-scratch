@@ -112,6 +112,12 @@ class DecisionDataset:
             add_generation_prompt=True,
             tokenize=True,
         )
+        # transformers 5.x 返回 BatchEncoding，旧版返回 list[int]，统一成 list
+        if hasattr(prompt_ids, "input_ids"):
+            prompt_ids = prompt_ids["input_ids"]
+        if prompt_ids and isinstance(prompt_ids[0], list):
+            prompt_ids = prompt_ids[0]
+        prompt_ids = list(prompt_ids)
         # 目标文本不再加特殊 token（prompt 侧已带好），末尾补 eos 标记结束
         target_ids = self.tokenizer(
             target_text(question, label) + self.tokenizer.eos_token,
