@@ -110,6 +110,10 @@ def main() -> None:
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
 
+    # HF 缓存默认在系统盘 ~/.cache/huggingface，重定向到数据盘避免重建丢失
+    if not os.environ.get("HF_HOME"):
+        os.environ["HF_HOME"] = str(output.parent / ".hf_cache")
+
     print(f"模型：{args.model}")
     print(f"目标：{output}")
     print(f"来源：{args.source}")

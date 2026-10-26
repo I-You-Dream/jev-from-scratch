@@ -40,14 +40,28 @@ from typing import Any, Callable
 # ============================================================
 
 
+def _resolve_label(raw: Any, label_names: list[str] | None) -> str:
+    """把标签统一成字符串。
+
+    HF 数据集的标签有两种形态：
+      - int 下标 + ClassLabel 名称表（官方老数据集常见）
+      - 直接就是字符串（mteb 等社区转换版常见）
+    """
+    if isinstance(raw, str):
+        return raw
+    if label_names and 0 <= raw < len(label_names):
+        return label_names[raw]
+    return str(raw)
+
+
 def _norm_banking77(rec: dict, label_names: list[str] | None) -> dict:
     """Banking77：客服查询文本 + 意图标签（77 类）。"""
-    return {"text": rec["text"], "label": label_names[rec["label"]]}
+    return {"text": rec["text"], "label": _resolve_label(rec["label"], label_names)}
 
 
 def _norm_ag_news(rec: dict, label_names: list[str] | None) -> dict:
     """AG News：新闻标题+正文 → 4 大主题。"""
-    return {"text": rec["text"], "label": label_names[rec["label"]]}
+    return {"text": rec["text"], "label": _resolve_label(rec["label"], label_names)}
 
 
 def _norm_yahoo_topics(rec: dict, label_names: list[str] | None) -> dict:
@@ -58,7 +72,7 @@ def _norm_yahoo_topics(rec: dict, label_names: list[str] | None) -> dict:
     title = (rec.get("question_title") or "").strip()
     content = (rec.get("question_content") or "").strip()
     text = f"{title}\n{content}".strip()
-    return {"text": text, "label": label_names[rec["topic"]]}
+    return {"text": text, "label": _resolve_label(rec["topic"], label_names)}
 
 
 def _norm_goemotions(rec: dict, label_names: list[str] | None) -> dict:
@@ -70,7 +84,7 @@ def _norm_goemotions(rec: dict, label_names: list[str] | None) -> dict:
     labels = rec.get("labels") or []
     if not labels:
         return None  # 无标签记录直接跳过
-    return {"text": rec["text"], "label": label_names[labels[0]]}
+    return {"text": rec["text"], "label": _resolve_label(labels[0], label_names)}
 
 
 def _norm_yelp_full(rec: dict, label_names: list[str] | None) -> dict:
@@ -78,8 +92,9 @@ def _norm_yelp_full(rec: dict, label_names: list[str] | None) -> dict:
 
     原始标签是 0–4，映射成人可读的「N 星」，便于 score 原语直接当等级名。
     """
-    star = rec["label"] + 1
-    return {"text": rec["text"], "label": f"{star}星"}
+    raw = rec["label"]
+    star = raw + 1 if isinstance(raw, int) else raw  # 兼容已是"N星"文本的转换版
+    return {"text": rec["text"], "label": f"{star}星" if isinstance(raw, int) else str(raw)}
 
 
 def _norm_snli(rec: dict, label_names: list[str] | None) -> dict:
@@ -92,7 +107,7 @@ def _norm_snli(rec: dict, label_names: list[str] | None) -> dict:
     # premise/hypothesis 分开保留，build_dataset 阶段构造「假设成立吗」命题
     return {
         "text": f"前提：{rec['premise']}\n假设：{rec['hypothesis']}",
-        "label": label_names[rec["label"]],
+        "label": _resolve_label(rec["label"], label_names),
     }
 
 
@@ -110,7 +125,10 @@ DatasetNorm = Callable[[dict, list[str] | None], dict | None]
 
 DATASETS: dict[str, dict[str, Any]] = {
     "banking77": {
-        "hf_id": "PolyAI/banking77",
+        # 不用 PolyAI/banking77：那是老式 loading-script 数据集，
+        # datasets 5.x 已不再支持（报 "Dataset scripts are no longer supported"）。
+        # mteb/banking77 是社区转换的 Parquet 版，内容等价。
+        "hf_id": "mteb/banking77",
         "primitive": "choice",
         "industry": "客服",
         "description": "银行客服细粒度意图（77 类）",
@@ -244,6 +262,11 @@ def main() -> None:
     args = parse_args()
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+
+    # datasets 默认把缓存写进 ~/.cache/huggingface（系统盘，实例重建即丢），
+    # 这里重定向到输出目录下的 .hf_cache，跟随数据盘持久化
+    if not os.environ.get("HF_HOME"):
+        os.environ["HF_HOME"] = str(output / ".hf_cache")
 
     # 只检测不设置：是否配了镜像影响能否直连下载
     if not os.environ.get("HF_ENDPOINT"):

@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 本仓库当前**只作代码暂存**：本机不装 torch、不下载模型、不跑训练。完整流程在云服务器上执行（见 `docs/roadmap.md`）。当前处于 **Phase 0**：`schema.py` 契约层已完成并有测试覆盖；`primitives.py` / `engine.py` / `calibration.py` / `scripts/*` 全部是 `NotImplementedError` 占位。改动这些占位时，保持 docstring 里标注的 Phase 编号与 roadmap 一致。
 
+## 开发工作流（用户约定）
+
+**本地写代码 → push GitHub → 服务器 `git pull` → 只在服务器上运行。**
+
+- 本地目录仅作编辑场所，不作备份、不运行项目代码
+- 不在本地与服务器之间 scp 同步源码（一次性传输验证除外）
+- 云服务器：`ssh connect.westd.seetacloud.com`（AutoDL 系实例，重启后 host/port 可能变化，机身份认 `machine_id`）
+- 服务器环境：代码 `/root/autodl-tmp/jev-from-scratch`、Python `/root/autodl-tmp/envs/jev/bin/python`，全在数据盘 `/root/autodl-tmp`（150G，实例重建不丢）；**任何下载/缓存不得落在系统盘**
+- 服务器网络：GitHub/HF 直连不通，用 `source /etc/network_turbo` 加速；pip 走清华源时反而要关掉加速
+- 非交互 SSH 无 PATH 中的 conda/python，一律用绝对路径
+
 ## 常用命令
 
 ```bash
