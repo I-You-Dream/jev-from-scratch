@@ -55,14 +55,36 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="构建微调训练数据集")
     p.add_argument("--input", default="data/raw", help="fetch_data.py 的输出目录")
     p.add_argument("--output", default="data/samples", help="训练样本输出目录")
-    p.add_argument("--limit-per-source", type=int, default=None,
-                   help="每个数据源最多采样多少条（含各 split），默认全部")
+    p.add_argument("--limit-per-split", type=int, default=None,
+                   help="每个数据源、每个 split 最多采样多少条，默认全部")
+    p.add_argument("--val-ratio", type=float, default=0.1,
+                   help="原始数据缺 validation 时，从 train 切多少当 val，默认 %(default)s")
     p.add_argument("--distractors", type=int, default=5,
                    help="choice 候选集中的干扰项个数，默认 %(default)s")
     p.add_argument("--other-rate", type=float, default=0.05,
                    help="choice 低置信度样本（全干扰+其他）的比例，默认 %(default)s")
     p.add_argument("--seed", type=int, default=42, help="随机种子，默认 %(default)s")
     return p.parse_args()
+
+
+def group_by_split(records: list[dict], val_ratio: float,
+                   rng: random.Random) -> dict[str, list[dict]]:
+    """按 train/val/test 归组。
+
+    多数开源数据集只有 train/test，缺 validation —— 但温度缩放拟合（Phase 3）
+    必须有独立 val，否则会用 test 调参造成泄漏。这里从 train 尾部切一块出来。
+    """
+    groups: dict[str, list[dict]] = {"train": [], "val": [], "test": []}
+    for rec in records:
+        split = SPLIT_MAP.get(rec["split"], "train")
+        groups[split].append(rec)
+
+    if not groups["val"] and groups["train"]:
+        train = groups["train"]
+        rng.shuffle(train)
+        n_val = max(1, int(len(train) * val_ratio))
+        groups["val"], groups["train"] = train[:n_val], train[n_val:]
+    return groups
 
 
 def load_raw(input_dir: Path) -> dict[str, list[dict]]:
@@ -82,28 +104,35 @@ def convert(
     primitive: str,
     label_pool: list[str],
     rng: random.Random,
-    limit: int | None,
+    limit_per_split: int | None,
+    val_ratio: float,
     n_distractors: int,
     other_rate: float,
 ) -> list[dict]:
-    """把一个数据源的原始记录全部转成训练样本。"""
+    """把一个数据源的原始记录转成训练样本，按 split 分层截取。
+
+    分层的原因：raw 文件名排序会让 test 先于 train 被读入，
+    若对混在一起的记录直接截取，test 会挤占全部配额（真实踩过的坑）。
+    """
     builder = BUILDERS[primitive]
+    groups = group_by_split(raw_records, val_ratio, rng)
     samples: list[dict] = []
 
-    records = raw_records[:limit] if limit else raw_records
-    for i, rec in enumerate(records):
-        sample_id = f"{rec['source']}-{i:06d}"
-        if primitive == "choice":
-            sample = builder(
-                rec, label_pool, sample_id, rng,
-                n_distractors=n_distractors, other_rate=other_rate,
-            )
-        else:
-            sample = builder(rec, sample_id, rng)
-        if sample is not None:
-            # 保留 split 归属，后面按此分文件
-            sample["_split"] = SPLIT_MAP.get(rec["split"], "train")
-            samples.append(sample)
+    for split, records in groups.items():
+        if limit_per_split is not None:
+            records = records[:limit_per_split]
+        for i, rec in enumerate(records):
+            sample_id = f"{rec['source']}-{split}-{i:06d}"
+            if primitive == "choice":
+                sample = builder(
+                    rec, label_pool, sample_id, rng,
+                    n_distractors=n_distractors, other_rate=other_rate,
+                )
+            else:
+                sample = builder(rec, sample_id, rng)
+            if sample is not None:
+                sample["_split"] = split
+                samples.append(sample)
     return samples
 
 
@@ -146,7 +175,8 @@ def main() -> None:
         before = len(all_samples)
         all_samples.extend(convert(
             records, primitive, label_pool, rng,
-            limit=args.limit_per_source,
+            limit_per_split=args.limit_per_split,
+            val_ratio=args.val_ratio,
             n_distractors=args.distractors,
             other_rate=args.other_rate,
         ))
