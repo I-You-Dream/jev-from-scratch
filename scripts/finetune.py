@@ -27,14 +27,14 @@ import random
 import sys
 from pathlib import Path
 
-import torch
-from torch.utils.data import Dataset
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from jev_qwen.dataset import render_input, target_text  # noqa: E402
 from jev_qwen.schema import Question  # noqa: E402
 from pydantic import TypeAdapter  # noqa: E402
+
+# torch 改为延迟导入：小内存容器（cgroup 2GB）上 dry-run 只验数据管线时
+# 不必加载 torch（import 本身就吃 1~2GB），正式训练路径才 import
 
 # Question 是 Union 类型，用 TypeAdapter 还原成带类型的对象
 QUESTION_ADAPTER = TypeAdapter(Question)
@@ -74,11 +74,14 @@ def parse_args() -> argparse.Namespace:
 # ============================================================
 
 
-class DecisionDataset(Dataset):
+class DecisionDataset:
     """把训练样本编码成 input_ids / labels / attention_mask。
 
     labels 的约定：prompt 部分为 -100（不计损失），
     只有目标答案的 token 参与交叉熵——这正是「让正确候选似然更高」的训练信号。
+
+    不继承 torch.Dataset：实现 __len__/__getitem__ 即可被 Trainer 消费，
+    同时让 dry-run 路径完全绕开 torch（小内存容器可跑）。
     """
 
     def __init__(self, jsonl_path: Path, tokenizer, max_len: int, seed: int = 42):
@@ -137,9 +140,12 @@ class PadCollator:
     """把变长样本 pad 成 batch。labels 用 -100 填充，保证不进损失。"""
 
     def __init__(self, pad_token_id: int):
+        import torch  # noqa: F401  # 确认训练环境有 torch，dry-run 不会走到这
         self.pad_token_id = pad_token_id
 
     def __call__(self, features: list[dict]) -> dict:
+        import torch
+
         max_len = max(len(f["input_ids"]) for f in features)
         batch = {"input_ids": [], "labels": [], "attention_mask": []}
         for f in features:
@@ -157,6 +163,7 @@ class PadCollator:
 
 def load_model_and_tokenizer(model_path: str, args: argparse.Namespace):
     """加载 4bit 量化基座 + LoRA 适配器。"""
+    import torch
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
