@@ -333,7 +333,16 @@ def main() -> None:
         if line.strip()
     ]
     if args.limit:
-        samples = samples[: args.limit]
+        # 按原语分层抽样：直接取前 N 条会全是一种原语（choice 排在文件前面）
+        from collections import defaultdict
+
+        by_prim: dict[str, list[dict]] = defaultdict(list)
+        for s in samples:
+            by_prim[s["questions"][0]["type"]].append(s)
+        per = max(1, args.limit // 3)
+        samples = []
+        for prim in ("choice", "noul", "score"):
+            samples.extend(by_prim[prim][:per])
     print(f"测试样本：{len(samples)} 条")
 
     variants: list[tuple[str, str]] = [("base", args.base_model)]
