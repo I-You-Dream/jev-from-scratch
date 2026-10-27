@@ -207,7 +207,10 @@ def make_soft_label_trainer(Trainer, label_smoothing: float = 0.0):
             # num_items_in_batch 是 transformers 5.x 新加的归一化提示参数，
             # 这里用的是逐样本加权平均，不需要它，接受但忽略
             weights = inputs.pop("weight", None)  # [batch]
-            labels = inputs["labels"]
+            # 关键：labels 必须 pop 出来，不能传给 model——
+            # 否则 Qwen 内部会自己再算 loss 并 logits.float()，
+            # [b, seq, vocab] 转 float32 直接爆显存（全参训练暴露）
+            labels = inputs.pop("labels")
             outputs = model(**inputs)
             logits = outputs.logits
 
