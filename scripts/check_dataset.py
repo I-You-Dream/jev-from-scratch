@@ -91,8 +91,16 @@ def check_split(name: str, rows: list[dict], errors: list, warnings: list) -> di
             if q.levels != sorted(q.levels, key=lambda x: q.levels.index(x)):
                 pass  # levels 有序性由构造保证，这里只检查存在性
         else:  # noul
-            if not isinstance(label, bool):
-                errors.append(f"[{name}] {sid}: noul 标签应为 bool，实际 {type(label).__name__}")
+            # 标签可以是 bool（硬标签）或 float（软标签，p_true ∈ [0,1]）
+            if isinstance(label, bool):
+                pass
+            elif isinstance(label, float) and 0.0 <= label <= 1.0:
+                pass
+            else:
+                errors.append(
+                    f"[{name}] {sid}: noul 标签应为 bool 或 [0,1] 软标签，"
+                    f"实际 {type(label).__name__}={label!r}"
+                )
 
         # 4) 文本健康
         text = str(row["state"])

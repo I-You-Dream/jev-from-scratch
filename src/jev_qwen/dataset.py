@@ -202,16 +202,22 @@ def build_score_sample(raw: dict, sample_id: str, rng: random.Random) -> dict | 
 def build_noul_sample(raw: dict, sample_id: str, rng: random.Random) -> dict | None:
     """一条 noul 原始记录 → 训练样本。
 
-    boolq：标签直接是是非；snli 只保留蕴含(真)/矛盾(假)，
-    中立样本本就该让模型不确定，硬标 true/false 反而教坏校准，直接丢弃。
+    boolq：标签是 bool（硬标签）。
+    snli：蕴含→True、矛盾→False；中立→**软标签 0.5**。
+      中立样本的正确答案本就不确定，硬标 true/false 会教坏校准；
+      软标签让模型对「是」「否」都给高似然，softmax 后 p_true≈0.5，
+      这是 Jev 最核心的「学会说不确定」能力，不能再丢弃。
     """
     if raw["source"] == "boolq":
-        label = raw["label"] == "是"
+        label: bool | float = raw["label"] == "是"
         prompt = "所述问题的答案是肯定的吗？"
     elif raw["source"] == "snli":
         if raw["label"] == "neutral":
-            return None
-        label = raw["label"] == "entailment"
+            label = 0.5  # float 软标签，表示 p_true=0.5
+        elif raw["label"] == "entailment":
+            label = True
+        else:  # contradiction
+            label = False
         prompt = "根据前提，假设成立吗？"
     else:
         return None

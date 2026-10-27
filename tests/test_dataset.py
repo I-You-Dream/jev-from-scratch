@@ -159,12 +159,14 @@ class TestBuildSamples:
         sample = build_noul_sample(raw, "boolq-0", rng)
         assert sample["labels"]["q1"] is True
 
-    def test_snli_neutral_dropped(self):
-        # 中立样本硬标 true/false 会教坏校准，必须丢弃
+    def test_snli_neutral_soft_label(self):
+        # 中立样本 → p_true=0.5 软标签，训练模型学会「不确定」，而非丢弃
         rng = random.Random(0)
         raw = {"text": "前提：p\n假设：h", "label": "neutral", "source": "snli",
                "split": "train", "primitive": "noul", "industry": "推理"}
-        assert build_noul_sample(raw, "snli-0", rng) is None
+        sample = build_noul_sample(raw, "snli-0", rng)
+        assert sample is not None
+        assert sample["labels"]["q1"] == 0.5
 
     def test_snli_contradiction_false(self):
         rng = random.Random(0)

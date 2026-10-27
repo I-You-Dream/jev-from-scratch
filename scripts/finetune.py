@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from jev_qwen.dataset import render_input, target_text  # noqa: E402
-from jev_qwen.schema import Question  # noqa: E402
+from jev_qwen.schema import NoulQuestion, Question  # noqa: E402
 from pydantic import TypeAdapter  # noqa: E402
 
 # torch 改为延迟导入：小内存容器（cgroup 2GB）上 dry-run 只验数据管线时
@@ -103,18 +103,13 @@ class DecisionDataset:
                     self.records.append(json.loads(line))
 
         rng = random.Random(seed)
-        self.encoded = [self._encode(rec, rng) for rec in self.records]
+        self.encoded: list[dict] = []
+        for rec in self.records:
+            # 软标签样本会展开成两条，所以 _encode 返回 list
+            self.encoded.extend(self._encode(rec, rng))
 
-    def _encode(self, sample: dict, rng: random.Random) -> dict:
-        """单条样本 → 模型输入。prompt/target 分别 tokenize 后拼接。"""
-        question = QUESTION_ADAPTER.validate_python(sample["questions"][0])
-        label = sample["labels"][question.id]
-
-        # 多模板轮换：训练时随机挑一套，降低对单一措辞的过拟合
-        template_idx = rng.randrange(3)
-        prompt_text = render_input(sample["state"], question, template_idx)
-
-        # chat template 加上角色头；add_generation_prompt 留出 assistant 生成位
+    def _tokenize_prompt(self, prompt_text: str) -> list[int]:
+        """渲染 prompt 并套 chat template，返回 prompt 侧 token id。"""
         prompt_ids = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt_text}],
             add_generation_prompt=True,
@@ -125,23 +120,39 @@ class DecisionDataset:
             prompt_ids = prompt_ids["input_ids"]
         if prompt_ids and isinstance(prompt_ids[0], list):
             prompt_ids = prompt_ids[0]
-        prompt_ids = list(prompt_ids)
-        # 目标文本不再加特殊 token（prompt 侧已带好），末尾补 eos 标记结束
+        return list(prompt_ids)
+
+    def _pack(self, prompt_ids: list[int], target_text_: str, weight: float) -> dict:
+        """把 prompt + 目标文本拼成一条编码样本，附带样本权重。"""
         target_ids = self.tokenizer(
-            target_text(question, label) + self.tokenizer.eos_token,
+            target_text_ + self.tokenizer.eos_token,
             add_special_tokens=False,
         ).input_ids
-
-        input_ids = prompt_ids + target_ids
-        input_ids = input_ids[: self.max_len]  # 超长截断（决策样本一般很短）
-        labels = [-100] * len(prompt_ids) + target_ids
-        labels = labels[: self.max_len]
-
+        input_ids = (prompt_ids + target_ids)[: self.max_len]
+        labels = ([-100] * len(prompt_ids) + target_ids)[: self.max_len]
         return {
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": [1] * len(input_ids),
+            "weight": weight,
         }
+
+    def _encode(self, sample: dict, rng: random.Random) -> list[dict]:
+        """单条样本 → 一条或多条编码（软标签展开成两条）。"""
+        question = QUESTION_ADAPTER.validate_python(sample["questions"][0])
+        label = sample["labels"][question.id]
+
+        # 多模板轮换：训练时随机挑一套，降低对单一措辞的过拟合
+        prompt_text = render_input(sample["state"], question, rng.randrange(3))
+        prompt_ids = self._tokenize_prompt(prompt_text)
+
+        # 软标签：noul 的 float label（p_true），展开成「是」「否」两条带权重
+        if isinstance(question, NoulQuestion) and isinstance(label, float):
+            return [
+                self._pack(prompt_ids, "是", label),
+                self._pack(prompt_ids, "否", 1.0 - label),
+            ]
+        return [self._pack(prompt_ids, target_text(question, label), 1.0)]
 
     def __len__(self) -> int:
         return len(self.encoded)
@@ -151,7 +162,11 @@ class DecisionDataset:
 
 
 class PadCollator:
-    """把变长样本 pad 成 batch。labels 用 -100 填充，保证不进损失。"""
+    """把变长样本 pad 成 batch。labels 用 -100 填充，保证不进损失。
+
+    同时收集每个样本的 weight（软标签样本展开后两条各带 0.5），
+    供 SoftLabelTrainer 做加权 loss。
+    """
 
     def __init__(self, pad_token_id: int):
         import torch  # noqa: F401  # 确认训练环境有 torch，dry-run 不会走到这
@@ -161,13 +176,58 @@ class PadCollator:
         import torch
 
         max_len = max(len(f["input_ids"]) for f in features)
-        batch = {"input_ids": [], "labels": [], "attention_mask": []}
+        batch = {"input_ids": [], "labels": [], "attention_mask": [], "weight": []}
         for f in features:
             pad = max_len - len(f["input_ids"])
             batch["input_ids"].append(f["input_ids"] + [self.pad_token_id] * pad)
             batch["labels"].append(f["labels"] + [-100] * pad)
             batch["attention_mask"].append(f["attention_mask"] + [0] * pad)
+            batch["weight"].append(f.get("weight", 1.0))
         return {k: torch.tensor(v) for k, v in batch.items()}
+
+
+def make_soft_label_trainer(Trainer):
+    """构造支持样本级软标签权重的 Trainer 子类。
+
+    延迟接收 Trainer 基类：transformers.Trainer 依赖 torch，
+    必须在正式训练路径 import（dry-run 只跑 tokenizer，不加载 torch）。
+
+    默认 Trainer 的 loss 是对展平 token 求 CE 均值，无法表达「这条样本
+    只算 0.5 权重」；这里改为逐样本算 CE，再按 weight 加权平均。
+    """
+
+    class SoftLabelTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False):
+            import torch
+            import torch.nn as nn
+
+            weights = inputs.pop("weight", None)  # [batch]
+            labels = inputs["labels"]
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+            shift_logits = logits[..., :-1, :].contiguous().float()
+            shift_labels = labels[..., 1:].contiguous()
+
+            loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
+            per_token = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            ).view(shift_labels.shape)
+
+            # 逐样本平均：只对有效 token（非 -100）取均值
+            valid = (shift_labels != -100).float()
+            per_sample = (per_token * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
+
+            if weights is not None:
+                weights = weights.float().to(per_sample.device)
+                loss = (per_sample * weights).sum() / weights.sum().clamp(min=1e-8)
+            else:
+                loss = per_sample.mean()
+
+            return (loss, outputs) if return_outputs else loss
+
+    return SoftLabelTrainer
 
 
 # ============================================================
@@ -332,7 +392,8 @@ def main() -> None:
 
     # TensorBoard 日志写进 output_dir/runs，之后软链接到 /root/tf-logs 即可在面板看曲线
     tb_log_dir = output_dir / "runs"
-    trainer = Trainer(
+    SoftLabelTrainer = make_soft_label_trainer(Trainer)
+    trainer = SoftLabelTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
