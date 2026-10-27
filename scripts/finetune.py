@@ -253,6 +253,11 @@ def main() -> None:
           + (f"，验证 {len(eval_ds)} 条" if eval_ds else ""))
 
     output_dir = Path(args.output).resolve()
+
+    # warmup 占总步数 3%。transformers 5.x 移除了 warmup_ratio，自己算
+    steps_per_epoch = max(1, len(train_ds) // (args.batch_size * args.grad_accum))
+    warmup_steps = int(steps_per_epoch * args.epochs * 0.03)
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=args.epochs,
@@ -260,7 +265,7 @@ def main() -> None:
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
+        warmup_steps=warmup_steps,
         bf16=True,
         gradient_checkpointing=True,          # 用时间换显存
         logging_steps=10,
