@@ -63,6 +63,8 @@ def parse_args() -> argparse.Namespace:
                    help="choice 候选集中的干扰项个数，默认 %(default)s")
     p.add_argument("--other-rate", type=float, default=0.05,
                    help="choice 低置信度样本（全干扰+其他）的比例，默认 %(default)s")
+    p.add_argument("--balance", action="store_true",
+                   help="每个 split 内按原语配平到等量（取三原语最少者的数量）")
     p.add_argument("--seed", type=int, default=42, help="随机种子，默认 %(default)s")
     return p.parse_args()
 
@@ -136,6 +138,30 @@ def convert(
     return samples
 
 
+def balance_samples(samples: list[dict], rng: random.Random) -> list[dict]:
+    """每个 split 内按原语配平。
+
+    各数据源数量悬殊（snli 56 万 vs yelp 限量 3000），不配平的话
+    训练/验证/测试的原语占比会漂移，eval 指标被大原语主导。
+    这里把每个 split 里的 choice/noul/score 抽到等量。
+    """
+    by_split: dict[str, list[dict]] = defaultdict(list)
+    for s in samples:
+        by_split[s["_split"]].append(s)
+
+    balanced: list[dict] = []
+    for split, rows in by_split.items():
+        by_primitive: dict[str, list[dict]] = defaultdict(list)
+        for s in rows:
+            by_primitive[s["questions"][0]["type"]].append(s)
+        if not by_primitive:
+            continue
+        min_n = min(len(v) for v in by_primitive.values())
+        for rows_of_prim in by_primitive.values():
+            balanced.extend(rng.sample(rows_of_prim, min_n))
+    return balanced
+
+
 def write_split(samples: list[dict], output: Path) -> dict[str, int]:
     """按 split 分文件写盘（去掉内部字段 _split），返回各 split 条数。"""
     buckets: dict[str, list[dict]] = defaultdict(list)
@@ -182,6 +208,10 @@ def main() -> None:
         ))
         print(f"  [{source:<14}] {primitive:<6} 标签 {len(label_pool):>3} 个，"
               f"样本 {len(all_samples) - before:>6} 条")
+
+    if args.balance:
+        all_samples = balance_samples(all_samples, rng)
+        print("\n已按原语配平（每个 split 内三原语等量）")
 
     counts = write_split(all_samples, output)
     print("\n========== 落盘 ==========")
