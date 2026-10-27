@@ -1,11 +1,8 @@
 # jev-qwen-decision
 
-基于 **Qwen3.5-4B** 复刻 **Jev（System One）决策模型**的实验项目。
+基于 **Qwen3.5-4B** 复刻 **Jev（System One）决策模型**：不生成文本，只输出带校准概率的类型化答案。
 
-> 本仓库当前阶段仅作**代码暂存**用途：本机不装环境、不下载模型、不跑训练。
-> 完整流程将在云服务器上执行，见 [docs/roadmap.md](docs/roadmap.md)。
-
-## Jev 是什么
+## 什么是校准决策模型
 
 Jev 是 TypeSafe AI 于 2026-09-15 发布的首个「System One 决策模型」：
 
@@ -14,7 +11,7 @@ Jev 是 TypeSafe AI 于 2026-09-15 发布的首个「System One 决策模型」�
 - **类型安全**：合法输出空间在调用前由 schema 预先定义，不可能返回 schema 之外的值
 - **快速廉价**：官方口径 70–500ms 延迟、输入 $0.042/百万 token、输出免费
 
-「System One / Two」名称源自卡尼曼《思考，快与慢》：
+「System One / Two」源自卡尼曼《思考，快与慢》：
 系统 1 快速直觉，系统 2 缓慢审慎。现有 LLM 逐 token 生成、依赖思维链，更像系统 2；
 Jev 专攻系统 1 式的**有界、高速、可供软件直接消费**的判断。
 
@@ -30,10 +27,10 @@ Jev 专攻系统 1 式的**有界、高速、可供软件直接消费**的判断
 
 ## 与传统 LLM 的差异
 
-| 维度 | 传统 LLM | Jev / 本项目目标 |
+| 维度 | 传统 LLM | 本项目 |
 |---|---|---|
 | 输出 | 自由文本（需解析校验） | 强类型结构化数值 |
-| 采样 | 自回归逐 token 生成 | 并行读出（单次前向） |
+| 采样 | 自回归逐 token 生成 | 候选似然读出 |
 | 训练目标 | RLHF / RLVR | 校准决策（概率要"说到做到"） |
 | 幻觉 | 存在跑飞风险 | 结构上不可能输出 schema 外的值 |
 | 适用 | 写作、推理、解释 | 分类、路由、打分、门控 |
@@ -41,72 +38,105 @@ Jev 专攻系统 1 式的**有界、高速、可供软件直接消费**的判断
 > **心智模型**：把它当成"带概率的智能 if 语句"，而不是全知助手。
 > 它可能返回"错误的合法值"（在选项里选错），但不会越界；也不会算术、数数、比日期。
 
-## 技术路线（候选）
+## 技术方案
 
-复刻 Jev 有三条路线，按投入从小到大：
+### 推理：候选似然读出（零训练）
 
-1. **概率读出（零训练）** —— 首选起步
-   在 Qwen3.5-4B 上对候选项做似然读出（candidate likelihood readout），
-   将选项 logits 映射为 choice/score/noul 三种原语的概率输出。
-2. **QLoRA 微调**
-   用合成/标注决策数据微调，让模型学会给出校准概率。
-3. **RLCD 式校准训练**（Reinforcement Learning for Calibrated Decisions）
-   完整复刻需要大量算力与数据，暂不实施，仅在 docs 中记录思路。
+Qwen 是自回归生成模型，本项目不训练生成、而是**从候选 token 的似然读出概率**：
 
-详细设计见 [docs/design.md](docs/design.md)。
+```
+state + question + option_i → P(option_i | prompt)  对每个候选取补全对数似然
+                            → 长度归一化 → softmax → 原语概率输出
+```
+
+noul 视作「是/否」二选一，score 对每个等级标签同样处理。详细设计见 [docs/design.md](docs/design.md)。
+
+### 微调：三种训练形态
+
+| 形态 | 量化 | 可训练参数 | 说明 |
+|---|---|---|---|
+| QLoRA | 4bit NF4 | LoRA r16（0.5%） | 低显存（~6GB） |
+| **bf16 LoRA** | 无 | LoRA r16 | **校准最优**（~20GB） |
+| 全参 | 无 | 全部（42 亿） | 准确率最高（~70GB） |
+
+### 校准：对抗过自信的三板斧
+
+硬标签交叉熵天然把模型推向过自信（说 0.95 实际只对 70%）。本项目用三手段构成校准闭环：
+
+1. **软标签**（数据端）：SNLI 中立样本标注为 `p_true=0.5`，教模型学会「不确定」
+2. **标签平滑**（训练端）：硬标签 1 软化成 `1-ε`（ε=0.1）
+3. **温度缩放**（推理端）：验证集上拟合温度 T，把置信度拉回真实频率
+
+## 实验结果
+
+300 条分层测试集（choice/score/noul 各 100），温度缩放后：
+
+| 版本 | 准确率 | **ECE** | Brier |
+|---|---|---|---|
+| 零训练基线 | 32.7% | 0.260 | 0.233 |
+| QLoRA（4bit） | 78.3% | 0.077 | 0.075 |
+| **bf16 LoRA** | 79.0% | **0.045** | 0.071 |
+| 全参微调 | **81.0%** | 0.087 | 0.070 |
+
+三个结论：
+
+- **校准闭环达标**：ECE 从 0.39 降到 0.045（目标 < 0.05）
+- **量化损失精度**：4bit 的 ECE 0.077 比 bf16 的 0.045 差 1.7 倍——决策模型里量化省显存不划算
+- **全参的悖论**：准确率最高但校准最差，多花算力买 2% 准确率却牺牲校准
+
+完整过程与踩坑见 [docs/tutorial.md](docs/tutorial.md)。
+
+## 快速开始
+
+```bash
+# 1. 拉数据（各源限量，streaming）
+python scripts/fetch_data.py --limit 3000
+
+# 2. 构建训练集（负采样 + 软标签 + 原语配平）
+python scripts/build_dataset.py --balance --seed 42
+
+# 3. 体检
+python scripts/check_dataset.py
+
+# 4. 微调（非量化 LoRA，推荐）
+python scripts/finetune.py \
+    --model ./models/Qwen3.5-4B \
+    --train data/samples/train.jsonl --val data/samples/val.jsonl \
+    --output ./models/jev-lora-bf16-v0 \
+    --quantize none --label-smoothing 0.1
+
+# 5. 评测（含温度缩放）
+python scripts/compare_models.py \
+    --base-model ./models/Qwen3.5-4B \
+    --lora-adapters 'bf16=./models/jev-lora-bf16-v0' \
+    --test data/samples/test.jsonl --val data/samples/val.jsonl \
+    --fit-temp
+```
+
+显存参考：4B 模型 bf16 推理约 9–10GB；QLoRA 训练约 6GB，非量化 LoRA 约 20GB，全参约 70GB。
 
 ## 目录结构
 
 ```
-jev-qwen-decision/
-├── README.md                 # 本文件：项目说明、Jev 概念、技术路线
-├── .gitignore                # 忽略模型权重、数据集、缓存、虚拟环境
-├── requirements.txt          # 依赖清单（仅列包名，不安装；云服务器阶段使用）
-├── docs/
-│   ├── design.md             # 决策原语设计与 API 契约草案
-│   └── roadmap.md            # 云服务器阶段实施路线图
-├── src/
-│   └── jev_qwen/
-│       ├── __init__.py
-│       ├── schema.py         # 类型化问题与答案的 Pydantic 模型（核心契约）
-│       ├── primitives.py     # 三种决策原语的读出/评分逻辑（占位）
-│       ├── engine.py         # 决策引擎：state + questions → typed answers（占位）
-│       └── calibration.py    # 概率校准工具（占位）
+├── src/jev_qwen/
+│   ├── schema.py         # 类型化问答契约（Pydantic，唯一事实源）
+│   ├── dataset.py        # 样本构建：模板渲染、负采样、软标签
+│   ├── calibration.py    # 温度缩放 / ECE / Brier
+│   ├── primitives.py     # 候选似然读出（占位，Phase 2）
+│   └── engine.py         # 决策引擎（占位，Phase 2）
 ├── scripts/
-│   ├── infer.py              # 推理入口脚本（占位）
-│   └── evaluate.py           # 评测脚本：准确率 / 校准度(ECE) / 延迟（占位）
-├── tests/
-│   ├── __init__.py
-│   └── test_schema.py        # schema 单元测试（纯 pydantic，不依赖模型）
-└── data/
-    └── samples/              # 示例决策样本（state + questions + labels）
-        └── README.md         # 数据格式说明
-```
-
-## 云服务器阶段准备清单（仅文档，本机不执行）
-
-```bash
-# 1. 安装依赖（Linux + CUDA）
-pip install -r requirements.txt
-
-# 2. 下载模型（ModelScope 或 HuggingFace）
-modelscope download --model Qwen/Qwen3.5-4B --local_dir ./models/Qwen3.5-4B
-# 或
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./models/Qwen3.5-4B
-
-# 3. 跑通概率读出基线
-python scripts/infer.py --model ./models/Qwen3.5-4B --input data/samples/demo.jsonl
-```
-
-**显存参考**：4B 模型 bf16 推理约需 9–10GB；4bit 量化后约 3–4GB。
-训练（QLoRA）另需优化器状态，建议 ≥16GB（如 RTX 4090 / A10 / L20）。
-
-## 本地可运行的部分
-
-不装 torch 也能验证契约层：
-
-```bash
-python -m pytest tests/test_schema.py -v
+│   ├── fetch_data.py     # 拉取开源数据集
+│   ├── build_dataset.py  # 构建训练集（负采样/软标签/配平）
+│   ├── check_dataset.py  # 数据体检
+│   ├── finetune.py       # QLoRA / 非量化 LoRA / 全参微调
+│   ├── compare_models.py # 多版本对比评测（含温度缩放）
+│   └── logs_to_tb.py     # 训练日志转 TensorBoard
+├── tests/                # 单元测试（schema + dataset）
+├── docs/
+│   ├── design.md         # 决策原语契约
+│   ├── tutorial.md       # 完整教程（含踩坑记录）
+│   └── roadmap.md        # 实施路线图
+└── data/samples/         # 样本格式约定（*.jsonl 不入库）
 ```
 
 ## License
