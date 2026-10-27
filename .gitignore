@@ -1,3 +1,6 @@
+# ===== Claude Code 本地配置（不上传） =====
+CLAUDE.md
+
 # ===== 虚拟环境 =====
 .venv/
 venv/
