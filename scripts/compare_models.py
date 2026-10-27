@@ -36,6 +36,7 @@ from pydantic import TypeAdapter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from jev_qwen.calibration import fit_temperature  # noqa: E402
 from jev_qwen.dataset import render_input, target_text  # noqa: E402
 from jev_qwen.schema import (  # noqa: E402
     ChoiceQuestion,
@@ -50,14 +51,19 @@ QUESTION_ADAPTER = TypeAdapter(Question)
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="多版本决策模型对比评测")
     p.add_argument("--base-model", required=True, help="基座模型路径")
-    p.add_argument("--lora-adapter", default=None, help="LoRA 适配器目录（QLoRA 版本）")
+    p.add_argument("--lora-adapters", default=None,
+                   help="LoRA 适配器，逗号分隔多个，格式 name=path（如 v1=/a,bf16=/b）")
     p.add_argument("--full-model", default=None, help="全参微调后的完整模型目录")
     p.add_argument("--test", default="data/samples/test.jsonl", help="测试样本")
+    p.add_argument("--val", default="data/samples/val.jsonl",
+                   help="验证样本，--fit-temp 时用于拟合温度")
     p.add_argument("--limit", type=int, default=300,
                    help="抽样多少条测试（候选似然读出较慢），默认 %(default)s")
     p.add_argument("--max-len", type=int, default=512)
     p.add_argument("--temperature", type=float, default=1.0,
                    help="softmax 温度；1.0 = 不做校准后处理，看原始校准度")
+    p.add_argument("--fit-temp", action="store_true",
+                   help="在 val 上拟合温度缩放，test 用拟合的 T 评测")
     p.add_argument("--output", default="evaluation_results.json")
     p.add_argument("--report", default="evaluation_summary.md")
     p.add_argument("--seed", type=int, default=42)
@@ -227,16 +233,12 @@ def predict_sample(model, tokenizer, sample: dict, max_len: int,
 # ============================================================
 
 
-def load_variant(name: str, args, device: str):
-    """加载一个待测版本：base / lora（基座+适配器）/ full（完整微调模型）。"""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+def load_variant(path: str, adapter: str | None, device: str):
+    """加载一个待测版本。
 
-    if name == "base":
-        path, adapter = args.base_model, None
-    elif name == "lora":
-        path, adapter = args.base_model, args.lora_adapter
-    else:
-        path, adapter = args.full_model, None
+    adapter 非空 = LoRA（基座 + 适配器）；否则 path 即完整模型。
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(path)
     model = AutoModelForCausalLM.from_pretrained(
@@ -250,13 +252,29 @@ def load_variant(name: str, args, device: str):
     return model, tokenizer
 
 
+def collect_scores(model, tokenizer, samples: list[dict], max_len: int,
+                   device: str) -> tuple[list[list[float]], list[int]]:
+    """对一组样本收集候选原始打分 + 正确候选下标（供温度拟合用）。"""
+    all_scores: list[list[float]] = []
+    all_labels: list[int] = []
+    for sample in samples:
+        question = QUESTION_ADAPTER.validate_python(sample["questions"][0])
+        label = target_text(question, sample["labels"][question.id])
+        prompt = render_input(sample["state"], question, template_idx=0)
+        cands = candidates_of(question)
+        scores = candidate_scores(model, tokenizer, prompt, cands, max_len, device)
+        all_scores.append(scores)
+        all_labels.append(cands.index(label))
+    return all_scores, all_labels
+
+
 def evaluate_variant(name: str, model, tokenizer, samples: list[dict],
-                     args) -> tuple[list[dict], dict]:
+                     args, temperature: float) -> tuple[list[dict], dict]:
     """跑完一个版本的全部样本，返回逐样本结果与聚合指标。"""
     records = []
     for i, sample in enumerate(samples):
         rec = predict_sample(
-            model, tokenizer, sample, args.max_len, args.temperature,
+            model, tokenizer, sample, args.max_len, temperature,
             device=model.device,
         )
         records.append(rec)
@@ -350,25 +368,54 @@ def main() -> None:
             samples.extend(by_prim[prim][:per])
     print(f"测试样本：{len(samples)} 条")
 
-    variants: list[tuple[str, str]] = [("base", args.base_model)]
-    if args.lora_adapter:
-        variants.append(("lora", args.lora_adapter))
+    # (name, model_path, adapter)：adapter 非空 = LoRA 版本
+    variants: list[tuple[str, str, str | None]] = [("base", args.base_model, None)]
+    if args.lora_adapters:
+        for item in args.lora_adapters.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            name, _, path = item.partition("=")
+            variants.append((name or Path(path).name, args.base_model, path))
     if args.full_model:
-        variants.append(("full", args.full_model))
+        variants.append(("full", args.full_model, None))
     print(f"对比版本：{[v[0] for v in variants]}")
+
+    # 温度拟合在 val 上做一次，val 样本只用于拟合不用于评测
+    val_samples: list[dict] = []
+    if args.fit_temp:
+        val_path = Path(args.val)
+        if val_path.exists():
+            val_samples = [
+                json.loads(line)
+                for line in val_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ][: args.limit]
 
     all_metrics: dict[str, dict] = {}
     all_records: dict[str, list[dict]] = {}
 
-    for name, path in variants:
+    for name, path, adapter in variants:
         print(f"\n=== 加载版本 [{name}] ← {path}")
-        model, tokenizer = load_variant(name, args, device="auto")
-        records, metrics = evaluate_variant(name, model, tokenizer, samples, args)
+        model, tokenizer = load_variant(path, adapter, device="auto")
+
+        temperature = args.temperature
+        if args.fit_temp and val_samples:
+            scores_list, labels_list = collect_scores(
+                model, tokenizer, val_samples, args.max_len, model.device
+            )
+            temperature = fit_temperature(scores_list, labels_list)
+            print(f"    [{name}] 拟合温度 T = {temperature:.3f}")
+
+        records, metrics = evaluate_variant(
+            name, model, tokenizer, samples, args, temperature
+        )
+        metrics["temperature"] = temperature
         all_metrics[name] = metrics
         all_records[name] = records
         print(f"    accuracy={metrics['overall']['accuracy']:.3f} "
               f"ece={metrics['overall']['ece']:.3f}")
-        # 顺序评测：测完释放，避免三个模型同时占显存
+        # 顺序评测：测完释放，避免多个模型同时占显存
         del model
         torch.cuda.empty_cache()
 
