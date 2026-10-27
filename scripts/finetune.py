@@ -244,29 +244,34 @@ def make_soft_label_trainer(Trainer, label_smoothing: float = 0.0):
 # ============================================================
 
 
-class TBCallback:
-    """自定义 TensorBoard 回调：把训练指标写到指定目录。
+def make_tb_callback(TrainerCallback):
+    """构造 TensorBoard 回调：把训练指标写到指定目录。
 
-    transformers 5.x 移除了 logging_dir 参数，且 report_to 的目录行为不确定；
+    继承 TrainerCallback 基类（它提供 on_init_end 等全部事件的默认空实现，
+    否则 Trainer 调用未定义事件会 AttributeError）。
+
+    transformers 5.x 移除了 logging_dir 参数，report_to 目录行为也不确定；
     干脆自己用 SummaryWriter 直写，目录可控、软链接方便。
     """
 
-    def __init__(self, log_dir: str):
-        from torch.utils.tensorboard import SummaryWriter
+    class TBCallback(TrainerCallback):
+        def __init__(self, log_dir: str):
+            from torch.utils.tensorboard import SummaryWriter
 
-        self.writer = SummaryWriter(log_dir)
-        self.log_dir = log_dir
+            self.writer = SummaryWriter(log_dir)
 
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        """每 logging_steps 触发一次，把标量指标写进 TB。"""
-        if not logs:
-            return
-        for key, value in logs.items():
-            if isinstance(value, (int, float)):
-                self.writer.add_scalar(key, value, state.global_step)
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            """每 logging_steps 触发一次，把标量指标写进 TB。"""
+            if not logs:
+                return
+            for key, value in logs.items():
+                if isinstance(value, (int, float)):
+                    self.writer.add_scalar(key, value, state.global_step)
 
-    def on_train_end(self, args, state, control, **kwargs):
-        self.writer.close()
+        def on_train_end(self, args, state, control, **kwargs):
+            self.writer.close()
+
+    return TBCallback
 
 
 def load_model_and_tokenizer(model_path: str, args: argparse.Namespace):
@@ -358,7 +363,7 @@ def main() -> None:
         return
 
     # ---- 正式训练 ----
-    from transformers import Trainer, TrainingArguments
+    from transformers import Trainer, TrainingArguments, TrainerCallback
 
     model, tokenizer = load_model_and_tokenizer(args.model, args)
 
@@ -402,6 +407,7 @@ def main() -> None:
     # TensorBoard 日志写进 output_dir/runs，之后软链接到 /root/tf-logs 即可在面板看曲线
     tb_log_dir = output_dir / "runs"
     SoftLabelTrainer = make_soft_label_trainer(Trainer, args.label_smoothing)
+    TBCallback = make_tb_callback(TrainerCallback)
     trainer = SoftLabelTrainer(
         model=model,
         args=training_args,
