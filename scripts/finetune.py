@@ -54,10 +54,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default="models/jev-qlora-v0", help="LoRA 适配器输出目录")
     # ---- 训练超参 ----
     p.add_argument("--epochs", type=float, default=2.0, help="训练轮数，默认 %(default)s")
-    p.add_argument("--lr", type=float, default=2e-4, help="学习率（QLoRA 常用 1e-4~2e-4）")
+    p.add_argument("--lr", type=float, default=None,
+                   help="学习率；缺省时全参 1e-5、LoRA 2e-4")
     p.add_argument("--batch-size", type=int, default=2, help="单卡 batch，默认 %(default)s")
     p.add_argument("--grad-accum", type=int, default=8, help="梯度累积步数")
     p.add_argument("--max-len", type=int, default=512, help="序列最大长度（决策样本较短）")
+    # ---- 精度与训练模式 ----
+    p.add_argument("--quantize", choices=["4bit", "none"], default="4bit",
+                   help="4bit=QLoRA 省显存；none=bf16 全精度（显存够时更快更准）")
+    p.add_argument("--full-finetune", action="store_true",
+                   help="全参数微调（不用 LoRA），精度上限最高")
+    p.add_argument("--no-grad-checkpoint", action="store_true",
+                   help="关闭梯度检查点，用显存换速度")
     # ---- LoRA 超参 ----
     p.add_argument("--lora-r", type=int, default=16, help="LoRA 秩，默认 %(default)s（16~32）")
     p.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha，默认 %(default)s")
@@ -168,40 +176,57 @@ class PadCollator:
 
 
 def load_model_and_tokenizer(model_path: str, args: argparse.Namespace):
-    """加载 4bit 量化基座 + LoRA 适配器。"""
+    """按训练模式加载基座：4bit 量化（省显存）或 bf16 全精度（快且准）。"""
     import torch
     from peft import LoraConfig, get_peft_model
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    # NF4 4bit 量化：4B 模型显存占用从 ~10GB 降到 ~3-4GB
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        quantization_config=quant_config,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-    )
+    if args.quantize == "4bit":
+        # NF4 4bit 量化：4B 模型显存占用从 ~10GB 降到 ~3-4GB
+        from transformers import BitsAndBytesConfig
 
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        target_modules=LORA_TARGET_MODULES,
-        task_type="CAUSAL_LM",
-        bias="none",
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            quantization_config=quant_config,
+            device_map="auto",
+            dtype=torch.bfloat16,
+        )
+    else:
+        # bf16 全精度：无量化/反量化开销，数值精度最好；显存 ~10GB 起
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            device_map="auto",
+            dtype=torch.bfloat16,
+        )
+
+    if args.full_finetune:
+        # 全参数微调：精度上限最高，显存需 ~50GB+（含 AdamW 状态）
+        model.train()
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"全参数微调：{trainable:,} / {total:,} 可训练（100%）")
+    else:
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=LORA_TARGET_MODULES,
+            task_type="CAUSAL_LM",
+            bias="none",
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
     return model, tokenizer
 
 
@@ -254,6 +279,9 @@ def main() -> None:
 
     output_dir = Path(args.output).resolve()
 
+    # 学习率默认值按模式：全参用小 lr 防灾难性遗忘，LoRA 可以激进些
+    lr = args.lr if args.lr is not None else (1e-5 if args.full_finetune else 2e-4)
+
     # warmup 占总步数 3%。transformers 5.x 移除了 warmup_ratio，自己算
     steps_per_epoch = max(1, len(train_ds) // (args.batch_size * args.grad_accum))
     warmup_steps = int(steps_per_epoch * args.epochs * 0.03)
@@ -263,11 +291,12 @@ def main() -> None:
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
-        learning_rate=args.lr,
+        learning_rate=lr,
         lr_scheduler_type="cosine",
         warmup_steps=warmup_steps,
         bf16=True,
-        gradient_checkpointing=True,          # 用时间换显存
+        # 梯度检查点省显存但变慢；显存富余时关掉换速度
+        gradient_checkpointing=not args.no_grad_checkpoint,
         logging_steps=10,
         save_strategy="epoch",
         eval_strategy="epoch" if eval_ds else "no",
