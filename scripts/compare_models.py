@@ -160,13 +160,18 @@ def candidate_scores(model, tokenizer, prompt: str, candidates: list[str],
         prompt_ids = prompt_ids["input_ids"]
     if prompt_ids and isinstance(prompt_ids[0], list):
         prompt_ids = prompt_ids[0]
-    prompt_ids = list(prompt_ids)
+    # 截断 prompt，至少留 1 个 token 位置给候选；否则 start 会越界
+    prompt_ids = list(prompt_ids)[: max_len - 1]
 
     scores = []
     for cand in candidates:
         cand_ids = tokenizer(cand, add_special_tokens=False).input_ids
         input_ids = (prompt_ids + cand_ids)[:max_len]
-        n_cand = max(1, min(len(cand_ids), len(input_ids) - len(prompt_ids)))
+        # 实际放进输入里的候选 token 数（prompt 占满时可能为 0）
+        n_cand = len(input_ids) - len(prompt_ids)
+        if n_cand <= 0:
+            scores.append(0.0)  # prompt 占满整个窗口，无法评估该候选
+            continue
 
         with torch.no_grad():
             logits = model(
