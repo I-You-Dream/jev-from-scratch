@@ -175,6 +175,31 @@ class PadCollator:
 # ============================================================
 
 
+class TBCallback:
+    """自定义 TensorBoard 回调：把训练指标写到指定目录。
+
+    transformers 5.x 移除了 logging_dir 参数，且 report_to 的目录行为不确定；
+    干脆自己用 SummaryWriter 直写，目录可控、软链接方便。
+    """
+
+    def __init__(self, log_dir: str):
+        from torch.utils.tensorboard import SummaryWriter
+
+        self.writer = SummaryWriter(log_dir)
+        self.log_dir = log_dir
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """每 logging_steps 触发一次，把标量指标写进 TB。"""
+        if not logs:
+            return
+        for key, value in logs.items():
+            if isinstance(value, (int, float)):
+                self.writer.add_scalar(key, value, state.global_step)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self.writer.close()
+
+
 def load_model_and_tokenizer(model_path: str, args: argparse.Namespace):
     """按训练模式加载基座：4bit 量化（省显存）或 bf16 全精度（快且准）。"""
     import torch
@@ -305,12 +330,15 @@ def main() -> None:
         remove_unused_columns=False,          # 我们的字段自己管理
     )
 
+    # TensorBoard 日志写进 output_dir/runs，之后软链接到 /root/tf-logs 即可在面板看曲线
+    tb_log_dir = output_dir / "runs"
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         data_collator=PadCollator(tokenizer.pad_token_id),
+        callbacks=[TBCallback(str(tb_log_dir))],
     )
 
     result = trainer.train()
