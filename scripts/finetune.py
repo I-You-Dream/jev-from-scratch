@@ -66,6 +66,8 @@ def parse_args() -> argparse.Namespace:
                    help="全参数微调（不用 LoRA），精度上限最高")
     p.add_argument("--no-grad-checkpoint", action="store_true",
                    help="关闭梯度检查点，用显存换速度")
+    p.add_argument("--label-smoothing", type=float, default=0.1,
+                   help="标签平滑系数，对抗硬标签 CE 过自信，默认 %(default)s")
     # ---- LoRA 超参 ----
     p.add_argument("--lora-r", type=int, default=16, help="LoRA 秩，默认 %(default)s（16~32）")
     p.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha，默认 %(default)s")
@@ -186,20 +188,21 @@ class PadCollator:
         return {k: torch.tensor(v) for k, v in batch.items()}
 
 
-def make_soft_label_trainer(Trainer):
-    """构造支持样本级软标签权重的 Trainer 子类。
+def make_soft_label_trainer(Trainer, label_smoothing: float = 0.0):
+    """构造支持样本级软标签权重 + 标签平滑的 Trainer 子类。
 
     延迟接收 Trainer 基类：transformers.Trainer 依赖 torch，
     必须在正式训练路径 import（dry-run 只跑 tokenizer，不加载 torch）。
 
     默认 Trainer 的 loss 是对展平 token 求 CE 均值，无法表达「这条样本
     只算 0.5 权重」；这里改为逐样本算 CE，再按 weight 加权平均。
+    label_smoothing > 0 时把硬标签 1 软化成 1-ε，其余概率摊到 ε——
+    对抗硬标签 CE 的过度自信，配合 neutral 软标签构成校准闭环。
     """
 
     class SoftLabelTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False):
             import torch
-            import torch.nn as nn
 
             weights = inputs.pop("weight", None)  # [batch]
             labels = inputs["labels"]
@@ -209,15 +212,21 @@ def make_soft_label_trainer(Trainer):
             shift_logits = logits[..., :-1, :].contiguous().float()
             shift_labels = labels[..., 1:].contiguous()
 
-            loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=-100)
-            per_token = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-            ).view(shift_labels.shape)
+            log_probs = torch.log_softmax(shift_logits, dim=-1)  # [b, s, V]
+            # 目标 token 的负 log 概率；-100 先 clamp 到 0 避免越界，再 mask
+            safe_labels = shift_labels.clamp(min=0)
+            nll = -log_probs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+
+            if label_smoothing > 0:
+                # 平滑项：对 vocab 均匀分布的负 log 概率均值
+                smooth = -log_probs.mean(dim=-1)
+                per_pos = (1 - label_smoothing) * nll + label_smoothing * smooth
+            else:
+                per_pos = nll
 
             # 逐样本平均：只对有效 token（非 -100）取均值
             valid = (shift_labels != -100).float()
-            per_sample = (per_token * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
+            per_sample = (per_pos * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
 
             if weights is not None:
                 weights = weights.float().to(per_sample.device)
@@ -392,7 +401,7 @@ def main() -> None:
 
     # TensorBoard 日志写进 output_dir/runs，之后软链接到 /root/tf-logs 即可在面板看曲线
     tb_log_dir = output_dir / "runs"
-    SoftLabelTrainer = make_soft_label_trainer(Trainer)
+    SoftLabelTrainer = make_soft_label_trainer(Trainer, args.label_smoothing)
     trainer = SoftLabelTrainer(
         model=model,
         args=training_args,
