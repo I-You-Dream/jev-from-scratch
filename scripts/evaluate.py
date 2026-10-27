@@ -1,6 +1,6 @@
 """评测脚本：准确率 / 校准度(ECE) / Brier / 延迟。
 
-用法（云服务器阶段）：
+用法：
     python scripts/evaluate.py --pred predictions.jsonl --gold data/samples/test.jsonl
 
 指标按原语类型（noul / choice / score）分别统计，输出 JSON + 文本报表。

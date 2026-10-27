@@ -214,12 +214,15 @@ def make_soft_label_trainer(Trainer, label_smoothing: float = 0.0):
             outputs = model(**inputs)
             logits = outputs.logits
 
+            # CausalLM 用位置 i 的 logit 预测位置 i+1 的 token：
+            # logits 去掉最后一位、labels 去掉第一位，逐位对齐
             shift_logits = logits[..., :-1, :].contiguous().float()
             shift_labels = labels[..., 1:].contiguous()
 
             log_probs = torch.log_softmax(shift_logits, dim=-1)  # [b, s, V]
-            # 目标 token 的负 log 概率；-100 先 clamp 到 0 避免越界，再 mask
+            # 目标 token 的负 log 概率；-100 先 clamp 到 0 避免 gather 越界，再 mask
             safe_labels = shift_labels.clamp(min=0)
+            # gather 沿 vocab 维取出每个位置「目标 token」的 log prob
             nll = -log_probs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
 
             if label_smoothing > 0:

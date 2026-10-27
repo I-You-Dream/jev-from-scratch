@@ -1,7 +1,7 @@
 """schema 契约的单元测试。
 
-纯 pydantic，不依赖 torch / 模型，可在本机直接跑：
-    python -m pytest tests/test_schema.py -v
+纯 pydantic，不依赖 torch / 模型：
+    PYTHONPATH=src python -m pytest tests/test_schema.py -v
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@
     - 渲染：state 稳定输出、三种原语的输入格式
     - 契约：构建出的样本能通过 schema 校验
 
-运行（服务器或本地均可）：
+运行：
     PYTHONPATH=src python -m pytest tests/test_dataset.py -v
 """
 

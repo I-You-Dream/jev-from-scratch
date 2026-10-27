@@ -1,6 +1,6 @@
 """推理入口脚本。
 
-用法（云服务器阶段）：
+用法：
     python scripts/infer.py --model ./models/Qwen3.5-4B --input data/samples/demo.jsonl
 
 输入：JSONL，每行一个 DecisionRequest 的 JSON（state + questions）

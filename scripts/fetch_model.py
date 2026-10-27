@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""下载 Qwen3.5-4B 模型权重到本地目录。
+"""下载 Qwen3.5-4B 模型权重到指定目录。
 
 用法（在项目根目录执行）：
     python scripts/fetch_model.py                              # 默认 ModelScope → ./models/Qwen3.5-4B
