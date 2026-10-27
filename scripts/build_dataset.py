@@ -194,6 +194,7 @@ def main() -> None:
     print(f"数据源：{', '.join(sorted(by_source))}\n")
 
     all_samples: list[dict] = []
+    per_source: dict[str, dict] = {}
     for source, records in sorted(by_source.items()):
         primitive = records[0]["primitive"]
         # 候选标签池：同数据源全部不同标签，用于负采样抽干扰项
@@ -206,6 +207,11 @@ def main() -> None:
             n_distractors=args.distractors,
             other_rate=args.other_rate,
         ))
+        per_source[source] = {
+            "primitive": primitive,
+            "n_labels": len(label_pool),
+            "n_samples": len(all_samples) - before,
+        }
         print(f"  [{source:<14}] {primitive:<6} 标签 {len(label_pool):>3} 个，"
               f"样本 {len(all_samples) - before:>6} 条")
 
@@ -224,6 +230,22 @@ def main() -> None:
     for s in all_samples:
         by_primitive[s["questions"][0]["type"]] += 1
     print("原语分布：", dict(by_primitive))
+
+    # 落盘：构建统计写入 reports/build_stats.json，供教程引用
+    stats_path = Path("reports") / "build_stats.json"
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats = {
+        "total_samples": len(all_samples),
+        "split_counts": counts,
+        "primitive_dist": dict(by_primitive),
+        "per_source": per_source,
+        "balance": args.balance,
+        "seed": args.seed,
+    }
+    stats_path.write_text(
+        json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"构建统计已落盘 → {stats_path}")
 
 
 if __name__ == "__main__":

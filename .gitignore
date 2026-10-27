@@ -51,5 +51,6 @@ runs/
 *.log
 evaluation_results.json
 evaluation_summary.*
+reports/
 .cache/
 hf_cache/

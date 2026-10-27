@@ -30,6 +30,8 @@ from jev_qwen.schema import DecisionRequest  # noqa: E402
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="训练数据体检")
     p.add_argument("--input", default="data/samples", help="build_dataset.py 的输出目录")
+    p.add_argument("--output", default="reports/check_report.json",
+                   help="体检报告落盘路径（JSON），默认 %(default)s")
     return p.parse_args()
 
 
@@ -185,6 +187,35 @@ def main() -> None:
         print("\n结论：数据体检通过，可以开训。")
     else:
         print("\n结论：存在阻断性问题，请修复后再开训。")
+
+    # 落盘：把分布统计与检查结果写成 JSON，供教程/复盘引用
+    from datetime import datetime
+
+    report = {
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+        "input": str(input_dir),
+        "passed": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "splits": {},
+    }
+    for name, st in all_stats.items():
+        lens = st["len_chars"]
+        report["splits"][name] = {
+            "n": st["n"],
+            "primitive": dict(st["primitive"]),
+            "other_samples": st["other_samples"],
+            "avg_len_chars": round(sum(lens) / len(lens), 1) if lens else 0,
+            "label_dist": dict(st["labels"]),
+        }
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"\n体检报告已落盘 → {out_path}")
+
+    if errors:
         sys.exit(1)
 
 
