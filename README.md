@@ -141,4 +141,4 @@ python scripts/compare_models.py \
 
 ## License
 
-待定（个人实验项目）。
+个人实验项目。
