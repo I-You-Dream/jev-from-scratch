@@ -201,9 +201,11 @@ def make_soft_label_trainer(Trainer, label_smoothing: float = 0.0):
     """
 
     class SoftLabelTrainer(Trainer):
-        def compute_loss(self, model, inputs, return_outputs=False):
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             import torch
 
+            # num_items_in_batch 是 transformers 5.x 新加的归一化提示参数，
+            # 这里用的是逐样本加权平均，不需要它，接受但忽略
             weights = inputs.pop("weight", None)  # [batch]
             labels = inputs["labels"]
             outputs = model(**inputs)
